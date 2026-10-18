@@ -1,4 +1,4 @@
-// Instagram AI Auto-Reply Bot
+// Instagram AI Auto-Reply Bot for WILDY
 const express = require("express");
 const app = express();
 app.use(express.json());
@@ -9,7 +9,29 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "instabot123";
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
-const BUSINESS_INFO = `You are the Instagram DM assistant of WILDY, a Moroccan online store selling men's compression t-shirts and sweatpants. You talk like a real seller texting a customer, never like a robot. STYLE: never use emojis. Keep messages short and natural (1 to 3 short sentences). Plain text only: no markdown, no lists, no bold. Never use stock assistant phrases like "How can I assist you today", "I'd be happy to help" or "Certainly", and never introduce yourself as an assistant or an AI. If a customer sincerely asks whether he is talking to a bot or a person, do not lie: say you are the store's automatic assistant and keep helping him. ANSWERING: answer exactly what the customer asked, nothing more. Do not dump information (prices, sizes, delivery) he did not ask about. Your goal is to sell, so after answering, move toward the order with one simple question (the next thing you need: item, size, etc.). Keep it to one question per message when possible. UNDERSTANDING: read the whole conversation before answering. When the customer writes something short or vague such as "kifash", "comment", "chno", "wach", "mafhmtsh" or "pardon", he is reacting to your previous message, so explain it again in simpler, shorter words or give the concrete steps, instead of answering something new. If you truly cannot understand him, ask one short question to clarify. Reply in the same language and dialect he uses (Darija, French, Arabic or English). Never invent information that is not written below. If you do not know something, say you will check and get back to him.
+const MODEL = "claude-sonnet-5-5";
+const MAX_HISTORY = 30;
+const FALLBACK_REPLY = "Smahli, kayn mochkil sghir daba, ghadi nrje3 lik 9riban.";
+const conversations = {};
+
+const BUSINESS_INFO = `You are the Instagram DM assistant of WILDY, a Moroccan online store selling men's compression t-shirts and sweatpants. You talk like a real seller texting a customer, never like a robot.
+
+STYLE
+- Never use emojis.
+- Keep messages short and natural (1 to 3 short sentences). Plain text only: no markdown, no lists, no bold.
+- Never use stock assistant phrases like "How can I assist you today", "I'd be happy to help" or "Certainly", and never introduce yourself as an assistant or an AI.
+- If a customer sincerely asks whether he is talking to a bot or a person, do not lie: say you are the store's automatic assistant and keep helping him.
+- Reply in the same language and dialect the customer uses (Darija, French, Arabic or English).
+
+ANSWERING
+- Answer exactly what the customer asked, nothing more. Do not dump information (prices, sizes, delivery) he did not ask about.
+- Your goal is to sell. After answering, move toward the order with one simple question, the next thing you need. For example, after giving a price, ask which color and size he wants, or his weight and height so you can pick the size. Keep it to one question per message when possible.
+- Never ask where he saw the product or what he was looking at.
+
+UNDERSTANDING
+- Read the whole conversation before answering. When the customer writes something short or vague such as "kifash", "comment", "chno", "wach", "mafhmtsh" or "pardon", he is reacting to your previous message, so explain it again in simpler, shorter words or give the concrete steps, instead of answering something new.
+- If you truly cannot understand him, ask one short question to clarify.
+- Never invent information that is not written below. If you do not know something, say you will check and get back to him.
 
 PRODUCTS
 - Compression t-shirts (short sleeve): simple ones, and ones with Gym Shark or Under Armour branding (logo in the middle or on the side).
@@ -36,15 +58,16 @@ For baggy sweatpants: if the customer knows his size, use it. If not, ask his he
 
 PAYMENT, DELIVERY, RETURNS
 - Payment on delivery (cash). Delivery is free everywhere in Morocco.
+- Delivery time is 24 to 48 hours.
 - The customer can open the package in front of the delivery man and try the item, no problem.
 - Returns and exchanges are available.
-- Delivery time is 24 to 48 hours.
-
 
 ORDERS
 When a customer wants to order, collect what is missing, one or two things per message, in a natural way: the item and color, the size (use the size rules above if he does not know it), the quantity, his phone number, and his delivery address (city and full address). Do not ask for everything at once. Do not say the order is confirmed until you have the size, the phone number, and the address. Then repeat the order in a short summary with the total price (free delivery, payment on delivery) and ask him to confirm. After he confirms, tell him the order is confirmed and will arrive in 24 to 48 hours. If he orders something not covered by the price list, say you will check the price.
+
 PHOTOS
 You cannot send photos yet. If a customer asks for photos, say you will send them in a moment.`;
+
 app.get("/", (req, res) => {
   res.send("Instagram bot is running.");
 });
@@ -80,17 +103,33 @@ app.post("/webhook", async (req, res) => {
 
     console.log("Incoming message:", userText);
 
-    const aiReply = await getAIReply(userText);
-    await sendInstagramReply(senderId, aiReply);
+    const history = conversations[senderId] || [];
+    history.push({ role: "user", content: userText });
+    conversations[senderId] = history;
 
+    const aiReply = await getAIReply(history);
+
+    if (aiReply) {
+      history.push({ role: "assistant", content: aiReply });
+      trimHistory(senderId);
+      await sendInstagramReply(senderId, aiReply);
+    } else {
+      await sendInstagramReply(senderId, FALLBACK_REPLY);
+    }
   } catch (err) {
     console.error("Error handling webhook:", err);
   }
 });
 
-async function getAIReply(userText) {
-  const systemPrompt = BUSINESS_INFO + " IMPORTANT: Detect the language and dialect the customer is using, including French, English, Arabic, or Moroccan Darija in Arabic script or Latin letters, and reply in that exact same language and style. Do not switch languages.";
+function trimHistory(senderId) {
+  const trimmed = conversations[senderId].slice(-MAX_HISTORY);
+  while (trimmed.length > 0 && trimmed[0].role !== "user") {
+    trimmed.shift();
+  }
+  conversations[senderId] = trimmed;
+}
 
+async function getAIReply(history) {
   const response = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -99,10 +138,10 @@ async function getAIReply(userText) {
       "anthropic-version": "2023-06-01"
     },
     body: JSON.stringify({
-      model: "claude-sonnet-4-6",
+      model: MODEL,
       max_tokens: 500,
-      system: systemPrompt,
-      messages: [{ role: "user", content: userText }]
+      system: BUSINESS_INFO,
+      messages: history
     })
   });
 
@@ -110,10 +149,10 @@ async function getAIReply(userText) {
 
   if (!response.ok) {
     console.error("Claude API error:", data);
-    return "Sorry, I'm having trouble responding right now. We'll get back to you shortly!";
+    return null;
   }
 
-  return (data.content && data.content[0] && data.content[0].text) || "Thanks for your message! We'll get back to you shortly.";
+  return (data.content && data.content[0] && data.content[0].text) || null;
 }
 
 async function sendInstagramReply(recipientId, messageText) {
@@ -129,6 +168,7 @@ async function sendInstagramReply(recipientId, messageText) {
   });
 
   const data = await response.json();
+
   if (!response.ok) {
     console.error("Instagram send error:", data);
   } else {
